@@ -2,35 +2,66 @@ import asyncio
 import can 
 import rclpy
 import os
-import sys
 import time
+import threading
+import logging
 from rclpy.node import Node
 from fs_msgs.msg import CanData
-from rclpy.executors import ExternalShutdownException
+from rclpy.executors import MultiThreadedExecutor
+
+
+#使用了异步需要配置异步
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+
+class BridgeVal():
+    bus0 = None
+    bus1 = None
+    recv0pub = None
+    recv1pub = None
+    
 
 class CanBridge(Node):
-    def __init__(self, can_dev, asyn):
-        super().__init__('can_bridge'+'_'+str(can_dev)+'_'+str(asyn))
-        self._bus = can.interface.Bus(channel=can_dev, bustype="socketcan")
+    def __init__(self, dev, bitrate):
+        super().__init__('can_bridge'+'_'+str(dev))
+        self._dev = dev
+        self._bitrate = bitrate
 
-        if asyn == 1:#It is not easy to judge by the BOOL type, which will affect the creation of nodes
-            self._can_pub = self.create_publisher(
-                CanData,
-                can_dev+"/recv",
-                10
-            )
-        else:
-            self._can_sub = self.create_subscription(
-                CanData,
-                can_dev+"/send",
-                self.send_callback,
-                10
-            )
+        self._can_pub = self.create_publisher(
+            CanData,
+            self._dev+"/recv",
+            10
+        )
+            
+        self._can_sub = self.create_subscription(
+            CanData,
+            self._dev+"/send",
+            self.send_callback,
+            10
+        )
 
+        self.can_init_dev()
+
+        self._can_bus = can.interface.Bus(channel=self._dev, bustype="socketcan") 
+            
     def send_callback(self, msg):
         sendmsg = can.Message(arbitration_id=msg.arbitration_id, \
             data=list(msg.data), is_extended_id=msg.extended)
-        self._bus.send(sendmsg)
+        self._can_bus.send(sendmsg)
+
+    def can_init_dev(self):
+        ret = os.system('sudo ip link set '+self._dev+' type can bitrate '+self._bitrate)
+        if ret != 0:
+            os.system('sudo ifconfig '+self._dev+' down')
+        os.system('sudo ip link set '+self._dev+' type can bitrate '+self._bitrate)
+        os.system('sudo ifconfig '+self._dev+' up')
+        os.system('sudo ifconfig '+self._dev+' txqueuelen 65536')
+        time.sleep(2)
+
+
+class AsynRecv():
+    def __init__(self, bus, pub):
+        self._bus = bus
+        self._pub = pub
 
     def recv_handle(self, msg):
         recvmsg = CanData()
@@ -39,8 +70,9 @@ class CanBridge(Node):
         recvmsg.data = msg.data
 
         if msg is None:
-            self.get_logger().warn("can recv_handle is none.")
-        self._can_pub.publish(recvmsg)
+            pass
+
+        self._pub.publish(recvmsg)
 
     async def can_recv(self):
         reader = can.AsyncBufferedReader()
@@ -51,32 +83,44 @@ class CanBridge(Node):
 
         notifier.stop()
 
-def can_init_dev(can_dev, can_bitrate):
-    ret = os.system('sudo ip link set '+can_dev+' type can bitrate '+can_bitrate)
-    if ret != 0:
-        os.system('sudo ifconfig '+can_dev+' down')
-    os.system('sudo ip link set '+can_dev+' type can bitrate '+can_bitrate)
-    os.system('sudo ifconfig '+can_dev+' up')
-    os.system('sudo ifconfig '+can_dev+' txqueuelen 65536')
-    time.sleep(2)
 
-#The dev parameter, which represents the CAN device number; the asyn parameter, which represents whether it is an asynchronous receive
-def can_process(dev, asyn):
+def run(bus, pub):
+    asynrecv = AsynRecv(bus, pub)
 
+    asyncio.run(asynrecv.can_recv())
+
+def main():
     rclpy.init()
     try:
-        can_bridge = CanBridge(dev,asyn)
-        if asyn == 1:
-            asyncio.run(can_bridge.can_recv())
-        try:
-            rclpy.spin(can_bridge)
-        finally:
-            can_bridge.destroy_node()
-    except KeyboardInterrupt:
-         pass
-    except ExternalShutdownException:
-        sys.exit(1)
-    finally:
-         rclpy.try_shutdown()
+        can0node = CanBridge("can0", "500000")
+        BridgeVal.bus0 = can0node._can_bus
+        BridgeVal.recv0pub = can0node._can_pub
+        can1node = CanBridge("can1", "500000")
+        BridgeVal.bus1 = can1node._can_bus
+        BridgeVal.recv1pub = can1node._can_pub
 
+        try:
+            can0asyn = threading.Thread(target=run, args=(BridgeVal.bus0,BridgeVal.recv0pub,))
+            can1asyn = threading.Thread(target=run, args=(BridgeVal.bus1,BridgeVal.recv1pub,))
+
+            can0asyn.start()
+            can1asyn.start()
+        except:
+            logging.error("asyn thread create fail.")
+        
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(can0node)
+        executor.add_node(can1node)
+        try:
+            executor.spin()
+        finally:
+            executor.shutdown()
+            can0node.destroy_node()
+            can1node.destroy_node()
+    except:
+        logging.error("bridge node create fail.")
+    finally:
+        can0asyn.join()
+        can1asyn.join()
+        rclpy.shutdown()
 
