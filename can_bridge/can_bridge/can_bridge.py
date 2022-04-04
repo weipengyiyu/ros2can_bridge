@@ -14,10 +14,8 @@ from rclpy.executors import MultiThreadedExecutor
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 
 class BridgeVal():
-    bus0 = None
-    bus1 = None
-    recv0pub = None
-    recv1pub = None
+    bus = None
+    recvpub = None
     
 
 class CanBridge(Node):
@@ -30,8 +28,7 @@ class CanBridge(Node):
             CanData,
             self._dev+"/recv",
             10
-        )
-            
+        
         self._can_sub = self.create_subscription(
             CanData,
             self._dev+"/send",
@@ -39,23 +36,12 @@ class CanBridge(Node):
             10
         )
 
-        self.can_init_dev()
-
-        self._can_bus = can.interface.Bus(channel=self._dev, bustype="socketcan") 
+        self._can_bus = can.Bus(bustype="socketcan", channel=self._dev)
             
     def send_callback(self, msg):
         sendmsg = can.Message(arbitration_id=msg.arbitration_id, \
             data=list(msg.data), is_extended_id=msg.extended)
         self._can_bus.send(sendmsg)
-
-    def can_init_dev(self):
-        ret = os.system('sudo ip link set '+self._dev+' type can bitrate '+self._bitrate)
-        if ret != 0:
-            os.system('sudo ifconfig '+self._dev+' down')
-        os.system('sudo ip link set '+self._dev+' type can bitrate '+self._bitrate)
-        os.system('sudo ifconfig '+self._dev+' up')
-        os.system('sudo ifconfig '+self._dev+' txqueuelen 65536')
-        time.sleep(2)
 
 
 class AsynRecv():
@@ -64,13 +50,12 @@ class AsynRecv():
         self._pub = pub
 
     def recv_handle(self, msg):
+        if msg.dlc != 8:
+            return
         recvmsg = CanData()
         recvmsg.extended = msg.is_extended_id
         recvmsg.arbitration_id= msg.arbitration_id
         recvmsg.data = msg.data
-
-        if msg is None:
-            pass
 
         self._pub.publish(recvmsg)
 
@@ -92,35 +77,27 @@ def run(bus, pub):
 def main():
     rclpy.init()
     try:
-        can0node = CanBridge("can0", "500000")
-        BridgeVal.bus0 = can0node._can_bus
-        BridgeVal.recv0pub = can0node._can_pub
-        can1node = CanBridge("can1", "500000")
-        BridgeVal.bus1 = can1node._can_bus
-        BridgeVal.recv1pub = can1node._can_pub
-
+        cannode = CanBridge("vcan0", "500000")
+        BridgeVal.bus = cannode._can_bus
+        BridgeVal.recvpub = cannode._can_pub
         try:
-            can0asyn = threading.Thread(target=run, args=(BridgeVal.bus0,BridgeVal.recv0pub,))
-            can1asyn = threading.Thread(target=run, args=(BridgeVal.bus1,BridgeVal.recv1pub,))
-
-            can0asyn.start()
-            can1asyn.start()
+            canasyn = threading.Thread(target=run, args=(BridgeVal.bus,BridgeVal.recvpub,))
+            canasyn.start()
         except:
             logging.error("asyn thread create fail.")
         
         executor = MultiThreadedExecutor(num_threads=4)
-        executor.add_node(can0node)
-        executor.add_node(can1node)
+        executor.add_node(cannode)
+
         try:
             executor.spin()
         finally:
             executor.shutdown()
-            can0node.destroy_node()
-            can1node.destroy_node()
+            cannode.destroy_node()
     except:
         logging.error("bridge node create fail.")
     finally:
-        can0asyn.join()
-        can1asyn.join()
+        canasyn.join()
+
         rclpy.shutdown()
 
