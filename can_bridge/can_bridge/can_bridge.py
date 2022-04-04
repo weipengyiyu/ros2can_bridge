@@ -1,22 +1,14 @@
 import asyncio
 import can 
 import rclpy
-import os
-import time
 import threading
 import logging
 from rclpy.node import Node
 from interface.msg import CanData
 from rclpy.executors import MultiThreadedExecutor
 
-
 #使用了异步需要配置异步
 logging.getLogger('asyncio').setLevel(logging.WARNING)
-
-class BridgeVal():
-    bus = None
-    recvpub = None
-    
 
 class CanBridge(Node):
     def __init__(self, dev, bitrate):
@@ -28,7 +20,7 @@ class CanBridge(Node):
             CanData,
             self._dev+"/recv",
             10
-        
+        )
         self._can_sub = self.create_subscription(
             CanData,
             self._dev+"/send",
@@ -78,10 +70,8 @@ def main():
     rclpy.init()
     try:
         cannode = CanBridge("vcan0", "500000")
-        BridgeVal.bus = cannode._can_bus
-        BridgeVal.recvpub = cannode._can_pub
         try:
-            canasyn = threading.Thread(target=run, args=(BridgeVal.bus,BridgeVal.recvpub,))
+            canasyn = threading.Thread(target=run, args=(cannode._can_bus,cannode._can_pub,))
             canasyn.start()
         except:
             logging.error("asyn thread create fail.")
