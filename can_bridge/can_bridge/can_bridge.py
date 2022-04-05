@@ -70,24 +70,30 @@ def main():
     rclpy.init()
     try:
         cannode = CanBridge("vcan0", "500000")
+        cannode1 = CanBridge("vcan1", "500000")
         try:
             canasyn = threading.Thread(target=run, args=(cannode._can_bus,cannode._can_pub,))
+            canasyn1 = threading.Thread(target=run, args=(cannode1._can_bus,cannode1._can_pub,))
             canasyn.start()
+            canasyn1.start()
         except:
             logging.error("asyn thread create fail.")
         
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(cannode)
+        executor.add_node(cannode1)
 
         try:
             executor.spin()
         finally:
             executor.shutdown()
             cannode.destroy_node()
+            cannode1.destroy_node()
     except:
         logging.error("bridge node create fail.")
     finally:
         canasyn.join()
+        canasyn1.join()
 
         rclpy.shutdown()
 
